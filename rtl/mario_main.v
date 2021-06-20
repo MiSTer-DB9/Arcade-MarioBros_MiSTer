@@ -8,9 +8,11 @@
 
 module mario_main
 (
-   input        I_CLK_24M,
-   input        I_CLK_12M,
-   input        I_MCPU_CLK,
+   input        I_CLK_48M,
+   input        I_CEN_12M,
+
+   input        I_MCPU_CEN4Mp,
+   input        I_MCPU_CEN4Mn,
    input        I_MCPU_RESETn,
 
    input        I_VRAMBUSY_n,
@@ -41,7 +43,15 @@ module mario_main
    output  [7:0]O_4C_Q,
    output  [7:0]O_2L_Q,
    output  [7:0]O_7M_Q,
-   output  [7:0]O_7J_Q
+   output  [7:0]O_7J_Q,
+
+   input          pause,
+
+   input   [15:0] hs_address,
+   input    [7:0] hs_data_in,
+   output   [7:0] hs_data_out,
+   input          hs_write,
+   input          hs_access
 );
 
 //-----------------------
@@ -61,26 +71,26 @@ wire   [15:0]W_MCPU_A;
 wire   [7:0]ZDO, ZDI;
 assign WI_D = ZDI;
 
-Z80IP CPU
-(
-   .CLK2X(),
-   .CLK(I_MCPU_CLK),
-   .RESET_N(I_MCPU_RESETn),
-   .INT_N(1'b1),
-   .NMI_N(W_MCPU_NMIn),
-   .ADRS(W_MCPU_A),
-   .DOUT(ZDI),
-   .DINP(ZDO),
-   .M1_N(W_MCPU_M1n),
-   .MREQ_N(W_MCPU_MREQn),
-   .IORQ_N(),
-   .RD_N(W_MCPU_RDn),
-   .WR_N(W_MCPU_WRn),
-   .WAIT_N(W_MCPU_WAITn),
-   .BUSWO(),
-   .RFSH_N(W_MCPU_RFSHn),
-   .HALT_N()
-);
+T80pa z80core(
+	.RESET_n(I_MCPU_RESETn),
+	.CLK(I_CLK_48M),
+	.CEN_p(I_MCPU_CEN4Mp),
+	.CEN_n(I_MCPU_CEN4Mn),
+	.WAIT_n(W_MCPU_WAITn && ~pause),
+	.INT_n(1'b1),
+	.NMI_n(W_MCPU_NMIn),
+	.BUSRQ_n(),
+	.BUSAK_n(),
+	.M1_n(W_MCPU_M1n),
+	.IORQ_n(),
+	.MREQ_n(W_MCPU_MREQn),
+	.RD_n(W_MCPU_RDn),
+	.WR_n(W_MCPU_WRn),
+	.RFSH_n(W_MCPU_RFSHn),
+	.A(W_MCPU_A),
+	.DI(ZDO),
+	.DO(ZDI)
+	);
 
 assign O_MCPU_A    = W_MCPU_A;
 assign O_MCPU_RDn  = W_MCPU_RDn;
@@ -112,8 +122,10 @@ wire  [7:0]W_7J_Q;
 
 mario_adec adec
 (
-   .I_CLK12M(I_CLK_12M),
-   .I_CLK(I_MCPU_CLK),
+   .I_CLK_48M(I_CLK_48M),
+   .I_CEN_12M(I_CEN_12M),
+   .I_CEN_4Mp(I_MCPU_CEN4Mp),
+   .I_CEN_4Mn(I_MCPU_CEN4Mn),
    .I_RESET_n(I_MCPU_RESETn),
    .I_AB(W_MCPU_A),
    .I_DB(WI_D),
@@ -123,7 +135,7 @@ mario_adec adec
    .I_WR_n(W_MCPU_WRn),
    .I_VRAMBUSY_n(I_VRAMBUSY_n),
    .I_VBLK_n(I_VBLK_n),
-   .I_DLCLK(I_CLK_24M),
+   .I_DLCLK(I_CLK_48M),
    .I_DLADDR(I_DLADDR),
    .I_DLDATA(I_DLDATA),
    .I_DLWR(I_DLWR),
@@ -165,8 +177,8 @@ assign O_7J_Q        = W_7J_Q;
 
 wire  [7:0]W_MROM_DO;
 
-MAIN_ROM mrom(I_CLK_12M, W_MCPU_A, W_MROM_CS_n, W_MCPU_RDn, W_MROM_DO, 
-              I_CLK_24M, I_DLADDR, I_DLDATA, I_DLWR);
+MAIN_ROM mrom(I_CLK_48M, W_MCPU_A, W_MROM_CS_n, W_MCPU_RDn, W_MROM_DO, 
+              I_CLK_48M, I_DLADDR, I_DLDATA, I_DLWR);
 
 //---------------------
 // Main CPU RAM 7A, 7B
@@ -176,23 +188,47 @@ MAIN_ROM mrom(I_CLK_12M, W_MCPU_A, W_MROM_CS_n, W_MCPU_RDn, W_MROM_DO,
 wire  [7:0]W_7B_DO;
 reg   [7:0]W_MRAM7B_DO;
 
-ram_2048_8 U_7B // 6000H - 67FFH
+// Hiscore mux
+wire hs_cs_7B = hs_address[15:11] == 5'b01100;
+wire hs_cs_7A = hs_address[15:11] == 5'b01101;
+wire  [7:0] hs_data_out_7B;
+wire  [7:0] hs_data_out_7A;
+assign hs_data_out = hs_cs_7B ? hs_data_out_7B : hs_data_out_7A;
+
+ram_2048_8_8 U_7B // 6000H - 67FFH
 (
-   .I_CLK(~I_CLK_12M),
-   .I_ADDR(W_MCPU_A[10:0]),
-   .I_D(WI_D),
-   .I_CE(~W_MRAM_CS_n[0]),
-   .I_WE(~W_MCPU_WRn),
-   .O_D(W_7B_DO)
+   .I_CLKA(I_CLK_48M),
+   .I_ADDRA(W_MCPU_A[10:0]),
+   .I_DA(WI_D),
+   .I_CEA(~W_MRAM_CS_n[0]),
+   .I_OEA(1'b1),
+   .I_WEA(~W_MCPU_WRn),
+   .O_DA(W_7B_DO),
+
+   .I_CLKB(I_CLK_48M),
+   .I_ADDRB(hs_address[10:0]),
+   .I_DB(hs_data_in),
+   .I_CEB(hs_access & hs_cs_7B),
+   .I_OEB(1'b1),
+   .I_WEB(hs_write & hs_cs_7B),
+   .O_DB(hs_data_out_7B)
 );
 
 wire  [7:0]W_7A_DO;
 reg   [7:0]W_MRAM7A_DO;
 
+wire [10:0] W_7A_ADDRB = hs_access ? hs_address[10:0] : W_DMAS_A;
+wire  [7:0] W_7A_DINB = hs_access ? hs_data_in : 8'h00;
+wire        W_7A_ENB = hs_access ? hs_cs_7A : W_DMAS_CE;
+wire        W_7A_WEB = hs_access ? hs_write & hs_cs_7A: 1'b0;
+wire  [7:0] W_7A_DOUTB;
+assign hs_data_out_7A = hs_access ? W_7A_DOUTB : 8'b0;
+assign W_DMAS_D = hs_access ? 8'b0 : W_7A_DOUTB;
+
 ram_2048_8_8 U_7A // 6800H - 6FFFH
 (
    // A Port
-   .I_CLKA(~I_CLK_12M),
+   .I_CLKA(I_CLK_48M),
    .I_ADDRA(W_MCPU_A[10:0]),
    .I_DA(WI_D),
    .I_CEA(~W_MRAM_CS_n[1]),
@@ -201,19 +237,21 @@ ram_2048_8_8 U_7A // 6800H - 6FFFH
    .O_DA(W_7A_DO),
 
    // B Port - DMA port (read-only)
-   .I_CLKB(I_CLK_12M),
-   .I_ADDRB(W_DMAS_A),
-   .I_DB(8'h00),
-   .I_CEB(W_DMAS_CE),
+   .I_CLKB(I_CLK_48M),
+   .I_ADDRB(W_7A_ADDRB),
+   .I_DB(W_7A_DINB),
+   .I_CEB(W_7A_ENB),
    .I_OEB(1'b1),
-   .I_WEB(1'b0),
-   .O_DB(W_DMAS_D)
+   .I_WEB(W_7A_WEB),
+   .O_DB(W_7A_DOUTB)
 );
 
-always@(posedge I_CLK_12M)
+always@(posedge I_CLK_48M)
 begin
-   W_MRAM7B_DO <= (W_MCPU_RDn == 1'b0 & W_MRAM_CS_n[0] == 1'b0) ? W_7B_DO : 8'h00;
-   W_MRAM7A_DO <= (W_MCPU_RDn == 1'b0 & W_MRAM_CS_n[1] == 1'b0) ? W_7A_DO : 8'h00;
+   if (I_CEN_12M) begin
+      W_MRAM7B_DO <= (W_MCPU_RDn == 1'b0 & W_MRAM_CS_n[0] == 1'b0) ? W_7B_DO : 8'h00;
+      W_MRAM7A_DO <= (W_MCPU_RDn == 1'b0 & W_MRAM_CS_n[1] == 1'b0) ? W_7A_DO : 8'h00;
+   end
 end
 
 //------------------------------------------
@@ -230,7 +268,8 @@ wire       W_DMAD_CE;
 
 mario_dma sprite_dma
 (
-   .I_CLK(~I_MCPU_CLK),
+   .I_CLK_48M(I_CLK_48M),
+   .I_CEN_4M(I_MCPU_CEN4Mn),
    .I_DMA_TRIG(W_2L_Q[5]),
    .I_DMA_DS(W_DMAS_D),
 
